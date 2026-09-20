@@ -1,0 +1,12 @@
+{
+  "name": "Subject Calculator Tablet Runner",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "Subject Calculator",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "postStartCommand": "bash .devcontainer/start-app.sh > /tmp/subject-calculator.log 2>&1 &"
+}
