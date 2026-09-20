@@ -1,0 +1,139 @@
+name: Subject Calculator Run Check
+
+on:
+  push:
+    branches:
+      - chatgpt-run-check
+
+jobs:
+  run-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Merge uploaded ZIP parts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat "Subject Calculator.zip.part"* > subject-calculator.zip
+          echo "Merged ZIP size:"
+          ls -lh subject-calculator.zip
+          unzip -t subject-calculator.zip | tail -5
+          mkdir -p extracted
+          unzip -q subject-calculator.zip -d extracted
+
+      - name: Locate app root
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Top-level extracted files:"
+          find extracted -maxdepth 3 -type f | head -100
+
+          PKG="$(find extracted -type f -name package.json -not -path '*/node_modules/*' | head -1 || true)"
+          PUBSPEC="$(find extracted -type f -name pubspec.yaml -not -path '*/.dart_tool/*' | head -1 || true)"
+
+          if [ -n "$PKG" ]; then
+            ROOT="$(dirname "$PKG")"
+            echo "kind=node" >> "$GITHUB_OUTPUT"
+            echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+            echo "Found Node app at: $ROOT"
+            echo "package.json:"
+            cat "$PKG"
+          elif [ -n "$PUBSPEC" ]; then
+            ROOT="$(dirname "$PUBSPEC")"
+            echo "kind=flutter" >> "$GITHUB_OUTPUT"
+            echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+            echo "Found Flutter app at: $ROOT"
+            cat "$PUBSPEC"
+          else
+            echo "No package.json or pubspec.yaml found."
+            exit 1
+          fi
+
+      - name: Setup Node
+        if: steps.locate.outputs.kind == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ steps.locate.outputs.root }}/package-lock.json
+
+      - name: Install Node dependencies
+        if: steps.locate.outputs.kind == 'node'
+        working-directory: ${{ steps.locate.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build Node app
+        if: steps.locate.outputs.kind == 'node'
+        working-directory: ${{ steps.locate.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build --if-present
+
+      - name: Start and smoke-test Node app
+        if: steps.locate.outputs.kind == 'node'
+        working-directory: ${{ steps.locate.outputs.root }}
+        shell: bash
+        run: |
+          set -u
+          node -e "const p=require('./package.json'); console.log('scripts:', p.scripts || {}); console.log('deps:', Object.keys({...p.dependencies,...p.devDependencies}))"
+
+          if node -e "const p=require('./package.json'); process.exit((p.dependencies&&p.dependencies.next)||(p.devDependencies&&p.devDependencies.next)?0:1)"; then
+            npm run dev -- -H 127.0.0.1 -p 3000 > /tmp/subject-calculator.log 2>&1 &
+          elif node -e "const p=require('./package.json'); process.exit((p.dependencies&&p.dependencies.vite)||(p.devDependencies&&p.devDependencies.vite)?0:1)"; then
+            npm run dev -- --host 127.0.0.1 --port 3000 > /tmp/subject-calculator.log 2>&1 &
+          elif node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.dev?0:1)"; then
+            PORT=3000 npm run dev > /tmp/subject-calculator.log 2>&1 &
+          elif node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.start?0:1)"; then
+            PORT=3000 npm start > /tmp/subject-calculator.log 2>&1 &
+          else
+            echo "No dev/start script available."
+            exit 1
+          fi
+
+          APP_PID=$!
+          echo "App PID: $APP_PID"
+
+          for i in $(seq 1 60); do
+            for port in 3000 5173 8080; do
+              CODE="$(curl -s -o /tmp/subject-response.html -w '%{http_code}' "http://127.0.0.1:$port/" || true)"
+              if [ "$CODE" != "000" ]; then
+                echo "Server responded on port $port with HTTP $CODE"
+                head -c 1000 /tmp/subject-response.html || true
+                echo
+                echo "--- app log ---"
+                cat /tmp/subject-calculator.log || true
+                kill "$APP_PID" || true
+                exit 0
+              fi
+            done
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              echo "App process exited early."
+              cat /tmp/subject-calculator.log || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          echo "Server did not become reachable."
+          cat /tmp/subject-calculator.log || true
+          kill "$APP_PID" || true
+          exit 1
+
+      - name: Flutter project detected
+        if: steps.locate.outputs.kind == 'flutter'
+        working-directory: ${{ steps.locate.outputs.root }}
+        run: |
+          echo "Flutter project detected. This run-check workflow currently verifies Node apps automatically."
+          exit 1
